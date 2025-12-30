@@ -1,0 +1,175 @@
+//=======================================================================================
+// Enhanced ORB Forex Indicator v2.0.0
+// 
+// Author: Shawn Harden - Jaguar Investment Group LLC
+// Version: 2.0.0
+// Release Date: December 30, 2025
+// Platform: TradingView Pine Script v5
+// 
+// Features:
+// • Volume-confirmed ORB breakouts
+// • Pullback & retest filters
+// • Auto SL/TP with 1:2 RR
+// • Session-based trading
+// • Professional dashboard
+// 
+// Best for: Forex majors (EURUSD, GBPUSD) on 1m-15m charts
+//=======================================================================================
+
+//@version=5
+indicator("Enhanced ORB Forex Indicator", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// === INPUT PARAMETERS ===
+orbPeriod = input.int(15, "ORB Period (minutes)", minval=1, maxval=60)
+sessionStart = input.session("0930-1600", "Trading Session")
+showRange = input(true, "Show ORB Range Box")
+showBreakout = input(true, "Show Breakout Signals")
+
+// === ENHANCEMENT 1: VOLUME FILTER ===
+useVolumeFilter = input(true, "Volume Filter")
+volumeThreshold = input.float(1.5, "Volume Threshold (x Average)", minval=1.0, step=0.1)
+volLookback = input.int(20, "Volume Average Lookback", minval=5)
+
+// === ENHANCEMENT 2: PULLBACK FILTER ===
+usePullbackFilter = input(true, "Pullback Filter")
+pullbackPct = input.float(2.0, "Pullback % Before Confirmation", minval=0.5, maxval=5.0, step=0.1)
+
+// === ENHANCEMENT 3: RETEST DETECTION ===
+useRetestFilter = input(true, "Retest Confirmation")
+retestLookback = input.int(10, "Retest Lookback Bars", minval=3, maxval=20)
+
+// === ENHANCEMENT 4: STOP-LOSS & TAKE-PROFIT ===
+showTargets = input(true, "Show SL/TP Levels")
+riskReward = input.float(2.0, "Risk:Reward Ratio", minval=1.0, step=0.1)
+useATR = input(false, "Use ATR for Targets")
+atrLength = input.int(14, "ATR Length")
+
+// === SESSION & ORB CALCULATION ===
+inSession = time(timeframe.period, sessionStart)
+isNewSession = ta.change(time("D")) != 0
+
+var float orbHigh = na
+var float orbLow = na
+var bool rangeFormed = false
+var int sessionBars = 0
+var box orbBox = na
+var line slLine = na
+var line tpLine = na
+
+// Reset at new session
+if isNewSession
+    orbHigh := na
+    orbLow := na
+    rangeFormed := false
+    sessionBars := 0
+    if not na(orbBox)
+        box.delete(orbBox)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+
+// Build ORB during period (convert minutes to bars)
+orbBars = math.round(orbPeriod / (timeframe.in_seconds() / 60))
+if inSession and sessionBars <= orbBars and not rangeFormed
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow := na(orbLow) ? low : math.min(orbLow, low)
+    sessionBars += 1
+    
+    if sessionBars >= orbBars
+        rangeFormed := true
+
+// === VOLUME FILTER ===
+avgVolume = ta.sma(volume, volLookback)
+volumeOK = not useVolumeFilter or volume > (avgVolume * volumeThreshold)
+
+// === PULLBACK FILTER ===
+rangeSize = orbHigh - orbLow
+pullbackDistance = rangeSize * (pullbackPct / 100)
+
+// === RETEST DETECTION ===
+var bool brokeHigh = false
+var bool brokeLow = false
+var int highBreakBar = 0
+var int lowBreakBar = 0
+
+// Detect initial breakouts
+longBreak = rangeFormed and close > orbHigh and not brokeHigh
+shortBreak = rangeFormed and close < orbLow and not brokeLow
+
+if longBreak
+    brokeHigh := true
+    highBreakBar := bar_index
+if shortBreak
+    brokeLow := true
+    lowBreakBar := bar_index
+
+// Retest detection (price returns to level after breakout)
+longRetest = brokeHigh and useRetestFilter and high(1) <= orbHigh and low <= orbHigh and bar_index - highBreakBar <= retestLookback
+shortRetest = brokeLow and useRetestFilter and low(1) >= orbLow and high >= orbLow and bar_index - lowBreakBar <= retestLookback
+
+// === FINAL SIGNAL CONDITIONS ===
+longCondition = rangeFormed and close > orbHigh and volumeOK and (not usePullbackFilter or high >= (orbHigh + pullbackDistance)) and (not useRetestFilter or longRetest)
+shortCondition = rangeFormed and close < orbLow and volumeOK and (not usePullbackFilter or low <= (orbLow - pullbackDistance)) and (not useRetestFilter or shortRetest)
+
+// Reset breakout flags on opposite break or new session
+if shortCondition and brokeHigh
+    brokeHigh := false
+if longCondition and brokeLow
+    brokeLow := false
+
+// === VISUAL ELEMENTS ===
+// ORB Range Box
+if showRange and rangeFormed and inSession
+    if na(orbBox)
+        orbBox := box.new(bar_index - sessionBars, orbHigh, bar_index + 20, orbLow, 
+                         border_color=color.blue, bgcolor=color.new(color.blue, 90), 
+                         border_width=2, extend=extend.right)
+
+// Breakout Signals
+plotshape(showBreakout and longCondition, "Long Breakout", shape.triangleup, location.belowbar, 
+          color.green, size=size.normal)
+plotshape(showBreakout and shortCondition, "Short Breakout", shape.triangledown, location.abovebar, 
+          color.red, size=size.normal)
+
+// ORB Levels
+plot(rangeFormed ? orbHigh : na, "ORB High", color.green, 2, plot.style_linebr)
+plot(rangeFormed ? orbLow : na, "ORB Low", color.red, 2, plot.style_linebr)
+
+// === STOP-LOSS & TAKE-PROFIT ===
+atrValue = ta.atr(atrLength)
+riskDistance = rangeFormed ? orbHigh - orbLow : atrValue
+
+if longCondition and showTargets
+    slPrice = orbLow
+    tpPrice = useATR ? close + (atrValue * riskReward) : close + (riskDistance * riskReward)
+    if na(slLine)
+        slLine := line.new(bar_index, slPrice, bar_index + 20, slPrice, color.red, 2, extend=extend.right)
+    if na(tpLine)
+        tpLine := line.new(bar_index, tpPrice, bar_index + 20, tpPrice, color.green, 2, extend=extend.right)
+    label.new(bar_index, tpPrice, "TP: " + str.tostring(tpPrice, "#.#####"), color=color.green, style=label.style_label_down)
+
+if shortCondition and showTargets
+    slPrice = orbHigh
+    tpPrice = useATR ? close - (atrValue * riskReward) : close - (riskDistance * riskReward)
+    if na(slLine)
+        slLine := line.new(bar_index, slPrice, bar_index + 20, slPrice, color.red, 2, extend=extend.right)
+    if na(tpLine)
+        tpLine := line.new(bar_index, tpPrice, bar_index + 20, tpPrice, color.green, 2, extend=extend.right)
+    label.new(bar_index, tpPrice, "TP: " + str.tostring(tpPrice, "#.#####"), color=color.green, style=label.style_label_up)
+
+// === TABLE FOR STATUS ===
+if rangeFormed
+    var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.white, border_width=1)
+    table.cell(infoTable, 0, 0, "ORB High", text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(orbHigh, "#.#####"), text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 0, 1, "ORB Low", text_color=color.red, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(orbLow, "#.#####"), text_color=color.red, text_size=size.small)
+    table.cell(infoTable, 0, 2, "Range Size", text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(rangeSize, "#.#####"), text_color=color.blue, text_size=size.small)
+    table.cell(infoTable, 0, 3, "Volume OK", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, volumeOK ? "YES" : "NO", text_color=volumeOK ? color.green : color.red, text_size=size.small)
+
+// === ALERTS ===
+alertcondition(longCondition, "ORB Long Signal", "ORB Long Breakout Confirmed!")
+alertcondition(shortCondition, "ORB Short Signal", "ORB Short Breakout Confirmed!")
